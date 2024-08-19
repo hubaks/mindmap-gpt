@@ -1,0 +1,6 @@
+streamlit
+markdown
+beautifulsoup4
+networkx
+openai
+pyvis
