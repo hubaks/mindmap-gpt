@@ -10,24 +10,35 @@ def parse_mind_map(md_content):
         node_content = line.strip()
         
         # Adjust the stack to match the current indentation level
-        if indent_level >= len(stack):
-            stack.append(None)  # Add a placeholder if stack is not long enough
+        while len(stack) > indent_level:
+            stack.pop()
         
-        parent_id = stack[indent_level - 1] if indent_level > 0 else None
         node_id = len(nodes)
-        stack[indent_level:] = [node_id]  # Update stack to current level
-        nodes.append((node_content, parent_id))
+        nodes.append((node_content, node_id))
         
-    return nodes
+        # Add the current node to the stack
+        stack.append(node_id)
+    
+    # Create the children dictionary
+    children = {}
+    for i, (content, node_id) in enumerate(nodes):
+        parent_id = None
+        if i > 0:
+            parent_id = nodes[i-1][1]
+        children[node_id] = []
+        if parent_id is not None:
+            children[parent_id].append(node_id)
+    
+    return nodes, children
 
 # Insert nodes into Neo4j
 def insert_mind_map_into_neo4j(nodes):
     driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "qwertyuiop"))
     with driver.session() as session:
-        for node_id, (content, parent_id) in enumerate(nodes):
+        for node_id, (content, _) in enumerate(nodes):
             session.write_transaction(create_node, node_id, content)
-            if parent_id is not None:
-                session.write_transaction(create_relationship, parent_id, node_id)
+            if node_id > 0:
+                session.write_transaction(create_relationship, node_id - 1, node_id, "HAS_CHILD")
     driver.close()
 
 # Create a node in Neo4j
@@ -35,9 +46,9 @@ def create_node(tx, node_id, content):
     tx.run("CREATE (n:Node {id: $id, content: $content})", id=node_id, content=content)
 
 # Create a relationship in Neo4j
-def create_relationship(tx, parent_id, child_id):
-    tx.run("MATCH (a:Node {id: $parent_id}), (b:Node {id: $child_id}) "
-           "CREATE (a)-[:HAS_CHILD]->(b)", parent_id=parent_id, child_id=child_id)
+def create_relationship(tx, parent_id, child_id, relationship_type):
+    query = f"MATCH (a:Node {{id: {parent_id}}}), (b:Node {{id: {child_id}}}) CREATE (a)-[:{relationship_type}]->(b)"
+    tx.run(query)
 
 # Extract the mind map from Neo4j and rebuild the Markdown
 def extract_mind_map_from_neo4j():
@@ -45,35 +56,39 @@ def extract_mind_map_from_neo4j():
     with driver.session() as session:
         result = session.run("MATCH (n:Node) OPTIONAL MATCH (n)-[:HAS_CHILD]->(m) RETURN n, collect(m) AS children")
         nodes = {}
+        children = {}
         for record in result:
             node = record["n"]
-            children = record["children"]
-            # Handle potential None values in the children list
+            child_nodes = record["children"]
             if node is not None:
-                children_ids = []
-                for child in children:
-                    if child is not None:
-                        children_ids.append(child["id"])
-                nodes[node["id"]] = (node["content"], children_ids)
+                node_id = node["id"]
+                nodes[node_id] = (node["content"], node["id"])
+                child_ids = [child["id"] for child in child_nodes if child is not None]
+                children[node_id] = child_ids
     driver.close()
-    return nodes
+    return nodes, children
 
 # Rebuild the Markdown structure
-def rebuild_markdown(nodes):
+def rebuild_markdown(nodes, children):
+    print("Nodes:", nodes)
+    print("Children:", children)
+
     def build_markdown(node_id, indent=0):
-        content, children = nodes[node_id]
+        content, _ = nodes[node_id]
         md_lines = [" " * indent + content]
-        for child_id in sorted(children):
-            md_lines.extend(build_markdown(child_id, indent + 2))
+        if node_id in children:
+            for child_id in sorted(children[node_id]):
+                md_lines.extend(build_markdown(child_id, indent + 2))
         return md_lines
 
-    # Find all nodes without a parent
-    root_nodes = [node_id for node_id, (content, children) in nodes.items() if not any(node_id in child for _, children in nodes.values())]
+    root_nodes = [node_id for node_id, child_ids in children.items() if not any(node_id in child_ids for _, child_ids in children.items())]
+    print(root_nodes)
     markdown_lines = []
     for root_node in root_nodes:
         markdown_lines.extend(build_markdown(root_node))
     
     return "\n".join(markdown_lines)
+
 
 # Streamlit app
 st.title("Mind Map Graph Database POC")
@@ -82,14 +97,14 @@ uploaded_file = st.file_uploader("Upload a Markdown file", type="md")
 
 if uploaded_file:
     content = uploaded_file.read().decode("utf-8")
-    nodes = parse_mind_map(content)
+    nodes, children = parse_mind_map(content)
     insert_mind_map_into_neo4j(nodes)
 
     st.write("Original Markdown:")
     st.code(content)
 
-    extracted_nodes = extract_mind_map_from_neo4j()
-    rebuilt_markdown = rebuild_markdown(extracted_nodes)
+    extracted_nodes, extracted_children = extract_mind_map_from_neo4j()
+    rebuilt_markdown = rebuild_markdown(extracted_nodes, extracted_children)
 
     st.write("Rebuilt Markdown from Neo4j:")
     st.code(rebuilt_markdown)
