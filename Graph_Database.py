@@ -33,7 +33,7 @@ def parse_mind_map(md_content):
 
 # Insert nodes into Neo4j
 def insert_mind_map_into_neo4j(nodes):
-    driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "qwertyuiop"))
+    driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", ""))
     with driver.session() as session:
         for node_id, (content, _) in enumerate(nodes):
             session.write_transaction(create_node, node_id, content)
